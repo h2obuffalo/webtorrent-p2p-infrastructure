@@ -1,0 +1,38 @@
+# STUN Server Deployment for Google Compute Engine
+# This uses coturn (TURN/STUN server)
+
+# 1. Create VM instance
+# gcloud compute instances create webtorrent-stun \
+#   --machine-type=e2-small \
+#   --image-family=ubuntu-2204-lts \
+#   --image-project=ubuntu-os-cloud \
+#   --tags=stun-server \
+#   --metadata=startup-script='#!/bin/bash
+# apt-get update
+# apt-get install -y coturn
+# cat > /etc/turnserver.conf << EOF
+# listening-port=3478
+# listening-ip=0.0.0.0
+# external-ip=$(curl -s https://api.ipify.org)
+# realm=webtorrent
+# server-name=webtorrent-stun
+# user-quota=12
+# total-quota=1200
+# no-stdout-log
+# log-file=/var/log/turnserver.log
+# verbose
+# EOF
+# systemctl enable coturn
+# systemctl start coturn
+# '
+
+# 2. Create firewall rule for STUN/TURN
+# gcloud compute firewall-rules create allow-stun-turn \
+#   --allow udp:3478,tcp:3478,udp:49152-65535 \
+#   --source-ranges 0.0.0.0/0 \
+#   --target-tags stun-server \
+#   --description "Allow STUN/TURN traffic"
+
+# 3. Get external IP
+# gcloud compute instances describe webtorrent-stun --format="get(networkInterfaces[0].accessConfigs[0].natIP)"
+

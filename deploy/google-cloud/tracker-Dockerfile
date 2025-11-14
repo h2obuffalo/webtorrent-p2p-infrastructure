@@ -1,0 +1,47 @@
+FROM node:20-slim
+
+WORKDIR /app
+
+# Install bittorrent-tracker
+RUN npm install -g bittorrent-tracker
+
+# Create simple server wrapper
+RUN echo 'const Server = require("bittorrent-tracker").Server; \
+const server = new Server({ \
+  udp: false, \
+  http: true, \
+  ws: true, \
+  stats: true \
+}); \
+const port = process.env.PORT || 8000; \
+server.on("error", (err) => { \
+  console.error("Tracker error:", err); \
+}); \
+server.on("warning", (err) => { \
+  console.warn("Tracker warning:", err); \
+}); \
+server.listen(port, () => { \
+  console.log(`WebTorrent tracker listening on port ${port}`); \
+  console.log(`WebSocket: wss://YOUR_DOMAIN/tracker`); \
+}); \
+const http = require("http"); \
+const healthServer = http.createServer((req, res) => { \
+  if (req.url === "/health" || req.url === "/") { \
+    res.writeHead(200, { "Content-Type": "application/json" }); \
+    res.end(JSON.stringify({ \
+      status: "healthy", \
+      service: "webtorrent-tracker", \
+      stats: server.torrents ? Object.keys(server.torrents).length : 0 \
+    })); \
+  } else { \
+    res.writeHead(404); \
+    res.end("Not found"); \
+  } \
+}); \
+healthServer.listen(8081, () => { \
+  console.log("Health check server on port 8081"); \
+});' > server.js
+
+EXPOSE 8000 8081
+
+CMD ["node", "server.js"]
