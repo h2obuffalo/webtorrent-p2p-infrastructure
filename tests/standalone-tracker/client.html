@@ -1,0 +1,263 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Standalone WebTorrent tracker/DataChannel test</title>
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 2rem; max-width: 1000px; }
+  pre { background: #111; color: #eee; padding: 1rem; white-space: pre-wrap; }
+  .pass { color: #087f23; }
+  .fail { color: #b00020; }
+</style>
+<h1>Standalone tracker/DataChannel test</h1>
+<p id="summary">Starting…</p>
+<pre id="log"></pre>
+<script>
+  // simple-websocket captures the WebSocket constructor while its bundle loads.
+  // Install this test-only observer first, then hand the wrapped constructor to WebTorrent.
+  window.__trackerSocketEvents = []
+  const NativeWebSocketForTest = window.WebSocket
+  window.WebSocket = class extends NativeWebSocketForTest {
+    constructor (...args) {
+      super(...args)
+      const url = String(args[0])
+      if (!url.includes('/announce')) return
+      const record = (kind, detail) => window.__trackerSocketEvents.push({ kind, detail: { url, ...detail, at: new Date().toISOString() } })
+      record('websocket', { state: 'constructing' })
+      this.addEventListener('open', () => record('websocket', { state: 'open' }))
+      this.addEventListener('close', event => record('websocket', { state: 'closed', code: event.code, reason: event.reason }))
+      this.addEventListener('error', () => record('error', { message: `tracker WebSocket error: ${url}` }))
+      this.addEventListener('message', event => {
+        let message
+        try { message = JSON.parse(typeof event.data === 'string' ? event.data : '') } catch (_) { message = { parseable: false } }
+        record('announce', { direction: 'received', action: message.action || null, hasOffer: Boolean(message.offer), hasAnswer: Boolean(message.answer), peerIdPresent: Boolean(message.peer_id), infoHashPresent: Boolean(message.info_hash) })
+      })
+      const originalSend = this.send.bind(this)
+      this.send = data => {
+        let message
+        try { message = JSON.parse(typeof data === 'string' ? data : '') } catch (_) { message = { parseable: false } }
+        record('announce', { direction: 'sent', action: message.action || null, offers: Array.isArray(message.offers) ? message.offers.length : 0, hasOffer: Boolean(message.offer), hasAnswer: Boolean(message.answer), hasPeerId: Boolean(message.peer_id), hasInfoHash: Boolean(message.info_hash) })
+        return originalSend(data)
+      }
+    }
+  }
+</script>
+<script src="/node_modules/webtorrent/webtorrent.min.js"></script>
+<script>
+(() => {
+  const params = new URLSearchParams(location.search)
+  const role = params.get('role') || 'B'
+  const trackerUrl = params.get('tracker') || 'ws://127.0.0.1:8000/announce'
+  const infoHash = '9a8097ef6e43369c9418c05ddadc0700b31ae8f6'
+  const fileName = 'standalone-p2p-test.bin'
+  const payloadText = 'standalone-p2p-infrastructure-test-v1\nknown bytes for browser A to browser B\n'
+  const payload = new TextEncoder().encode(payloadText)
+  const expectedHash = 'a162aaebe34550d34d2452f03aa2701922aa232d06ddb4a5c0fe525033401dd1'
+  const magnet = `magnet:?xt=urn:btih:${infoHash}&dn=${fileName}&tr=${encodeURIComponent(trackerUrl)}`
+  const evidence = {
+    role,
+    tracker: { url: trackerUrl, protocol: 'WebTorrent tracker over WebSocket', websocket: [], announces: [] },
+    swarm: { infoHash, magnet, expectedPayloadBytes: payload.length, expectedPayloadSha256: expectedHash },
+    peerDiscovery: [],
+    ice: { states: [], candidateTypes: [], selectedPairs: [], stats: [] },
+    dataChannel: { states: [], sentBytes: 0, receivedBytes: 0 },
+    payload: { source: role === 'A' ? 'Browser A seed' : 'Browser B WebTorrent download', bytes: 0, sha256: null },
+    errors: [],
+    startedAt: new Date().toISOString()
+  }
+  window.__standaloneEvidence = evidence
+  const logNode = document.querySelector('#log')
+  const summaryNode = document.querySelector('#summary')
+
+  const log = (category, detail) => {
+    const entry = { time: new Date().toISOString(), category, ...detail }
+    if (category === 'error') evidence.errors.push(entry)
+    logNode.textContent += JSON.stringify(entry) + '\n'
+    console.log('[standalone-p2p]', entry)
+  }
+
+  for (const event of window.__trackerSocketEvents) {
+    if (event.kind === 'websocket') evidence.tracker.websocket.push(event.detail)
+    if (event.kind === 'announce') evidence.tracker.announces.push(event.detail)
+    if (event.kind === 'error') evidence.errors.push(event.detail)
+    log(event.kind === 'error' ? 'error' : event.kind === 'announce' ? 'tracker-message' : event.detail.state === 'open' ? 'tracker-websocket-open' : 'tracker-websocket-state', event.detail)
+  }
+
+  // Independent transport probe: this is not a WebTorrent announce and does not
+  // participate in the swarm. The WebTorrent client below separately proves the
+  // tracker protocol exchange through trackerAnnounce and the server log.
+  const directTrackerProbe = new window.WebSocket(trackerUrl)
+  directTrackerProbe.addEventListener('open', () => {
+    log('direct-tracker-websocket-open', { url: trackerUrl, protocol: 'WebSocket handshake' })
+    directTrackerProbe.close(1000, 'probe complete')
+  })
+  directTrackerProbe.addEventListener('error', () => log('error', { message: 'independent tracker WebSocket probe failed' }))
+
+  const hash = async bytes => {
+    const digest = await crypto.subtle.digest('SHA-256', bytes)
+    return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
+  }
+
+  const candidateTypesFromStats = stats => Array.from(new Set(Array.from(stats.values())
+    .filter(item => item.type === 'local-candidate' || item.type === 'remote-candidate')
+    .map(item => item.candidateType)
+    .filter(Boolean)))
+
+  const capturePeerStats = async wire => {
+    const peer = wire && wire.__standalonePeer
+    const pc = peer && peer._pc
+    if (!pc || typeof pc.getStats !== 'function') {
+      log('error', { message: 'native RTCPeerConnection.getStats unavailable on WebTorrent wire' })
+      return false
+    }
+    try {
+      const stats = await pc.getStats()
+      const items = Array.from(stats.values())
+      const candidates = candidateTypesFromStats(stats)
+      evidence.ice.candidateTypes = Array.from(new Set(evidence.ice.candidateTypes.concat(candidates)))
+      const pairs = items.filter(item => item.type === 'candidate-pair' && (item.selected || item.state === 'succeeded'))
+      for (const pair of pairs) {
+        const local = stats.get(pair.localCandidateId)
+        const remote = stats.get(pair.remoteCandidateId)
+        const selected = {
+          state: pair.state,
+          nominated: pair.nominated,
+          localCandidateType: local && local.candidateType,
+          remoteCandidateType: remote && remote.candidateType,
+          localAddress: local && (local.address || local.ip),
+          remoteAddress: remote && (remote.address || remote.ip),
+          bytesSent: pair.bytesSent,
+          bytesReceived: pair.bytesReceived
+        }
+        evidence.ice.selectedPairs.push(selected)
+        log('ice-selected-pair', selected)
+      }
+      const dataChannels = items.filter(item => item.type === 'data-channel')
+      const statsSummary = dataChannels.map(item => ({
+        id: item.id,
+        label: item.label,
+        state: item.state,
+        bytesSent: item.bytesSent || 0,
+        bytesReceived: item.bytesReceived || 0,
+        messagesSent: item.messagesSent || 0,
+        messagesReceived: item.messagesReceived || 0
+      }))
+      evidence.ice.stats.push({
+        capturedAt: new Date().toISOString(),
+        connectionState: pc.connectionState,
+        iceConnectionState: pc.iceConnectionState,
+        candidateTypes: candidates,
+        dataChannels: statsSummary
+      })
+      for (const item of dataChannels) {
+        evidence.dataChannel.sentBytes = Math.max(evidence.dataChannel.sentBytes, item.bytesSent || 0)
+        evidence.dataChannel.receivedBytes = Math.max(evidence.dataChannel.receivedBytes, item.bytesReceived || 0)
+      }
+      log('native-getStats', {
+        connectionState: pc.connectionState,
+        iceConnectionState: pc.iceConnectionState,
+        candidateTypes: candidates,
+        dataChannels: statsSummary
+      })
+      return dataChannels.some(item => (item.bytesSent || 0) > 0 || (item.bytesReceived || 0) > 0)
+    } catch (error) {
+      log('error', { message: `getStats failed: ${error.message}` })
+      return false
+    }
+  }
+
+  const instrumentWire = (torrent, wire) => {
+    const peerRecord = Object.values(torrent._peers || {}).find(peer => peer.wire === wire)
+    const peer = peerRecord && peerRecord.conn
+    wire.__standalonePeer = peer
+    log('peer-discovered', { peerId: peerRecord && peerRecord.id, wireType: peerRecord && peerRecord.type })
+    evidence.peerDiscovery.push({ peerId: peerRecord && peerRecord.id, wireType: peerRecord && peerRecord.type })
+    if (peer && peer._pc) {
+      const pc = peer._pc
+      const recordIce = () => {
+        const state = { iceConnectionState: pc.iceConnectionState, connectionState: pc.connectionState, gatheringState: pc.iceGatheringState }
+        evidence.ice.states.push(state)
+        log('ice-state', state)
+      }
+      pc.addEventListener('iceconnectionstatechange', recordIce)
+      pc.addEventListener('connectionstatechange', recordIce)
+      recordIce()
+    }
+    if (peer && peer._channel) {
+      evidence.dataChannel.states.push(peer._channel.readyState)
+      log('datachannel-state', { state: peer._channel.readyState })
+    }
+    peer && peer.on && peer.on('connect', async () => {
+      evidence.dataChannel.states.push('open')
+      log('datachannel-state', { state: 'open' })
+      await capturePeerStats(wire)
+    })
+    peer && peer.on && peer.on('close', () => {
+      evidence.dataChannel.states.push('closed')
+      log('datachannel-state', { state: 'closed' })
+    })
+    setTimeout(() => capturePeerStats(wire), 1000)
+    setTimeout(() => capturePeerStats(wire), 2500)
+  }
+
+  const commonOptions = {
+    tracker: { rtcConfig: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] } },
+    dht: false,
+    lsd: false,
+    webSeeds: false
+  }
+  const client = new WebTorrent(commonOptions)
+  client.on('error', error => log('error', { message: `client: ${error.message}` }))
+
+  const finish = (message, pass) => {
+    evidence.finishedAt = new Date().toISOString()
+    evidence.pass = pass
+    summaryNode.textContent = `${pass ? 'PASS' : 'FAIL'} — ${message}`
+    summaryNode.className = pass ? 'pass' : 'fail'
+    log(pass ? 'pass' : 'error', { message })
+  }
+
+  if (role === 'A') {
+    const file = new File([payload], fileName, { type: 'application/octet-stream' })
+    const torrent = client.seed(file, {
+      announce: [trackerUrl],
+      name: fileName,
+      pieceLength: 16384,
+      creationDate: new Date('2024-01-01T00:00:00.000Z'),
+      createdBy: 'p2p-infra-standalone-test/1'
+    }, torrent => {
+      log('seed-ready', { infoHash: torrent.infoHash, expectedInfoHash: infoHash, magnetURI: torrent.magnetURI, files: torrent.files.map(item => ({ name: item.name, length: item.length })) })
+      if (torrent.infoHash !== infoHash) finish(`deterministic info hash mismatch: ${torrent.infoHash}`, false)
+      else finish('Browser A seeded the deterministic test swarm and is ready', true)
+    })
+    torrent.on('trackerAnnounce', () => log('tracker-announce', { infoHash: torrent.infoHash }))
+    torrent.on('wire', wire => instrumentWire(torrent, wire))
+    torrent.on('error', error => log('error', { message: `torrent: ${error.message}` }))
+  } else {
+    const torrent = client.add(magnet, { announce: [trackerUrl] }, () => {
+      log('metadata-ready', { infoHash: torrent.infoHash, expectedInfoHash: infoHash })
+      if (torrent.infoHash !== infoHash) return finish(`metadata info hash mismatch: ${torrent.infoHash}`, false)
+      torrent.files[0].getBuffer(async (error, buffer) => {
+        if (error) return finish(`payload read failed: ${error.message}`, false)
+        const actualHash = await hash(buffer)
+        evidence.payload.bytes = buffer.length
+        evidence.payload.sha256 = actualHash
+        log('payload-verified', { bytes: buffer.length, sha256: actualHash, expectedBytes: payload.length, expectedSha256: expectedHash })
+        for (const wire of torrent.wires) instrumentWire(torrent, wire)
+        const payloadPass = buffer.length === payload.length && actualHash === expectedHash
+        evidence.startedAtMs = Date.now()
+        const verifyStats = async () => {
+          let statsPass = false
+          for (const wire of torrent.wires) statsPass = (await capturePeerStats(wire)) || statsPass
+          if (payloadPass && statsPass) return finish('Browser B received and verified Browser A payload with non-zero native DataChannel stats', true)
+          if (Date.now() < evidence.startedAtMs + 8000) return setTimeout(verifyStats, 500)
+          finish(payloadPass ? 'payload passed but native getStats had no non-zero data-channel bytes' : 'payload bytes/hash mismatch', false)
+        }
+        verifyStats()
+      })
+    })
+    torrent.on('trackerAnnounce', () => log('tracker-announce', { infoHash: torrent.infoHash || infoHash }))
+    torrent.on('wire', wire => instrumentWire(torrent, wire))
+    torrent.on('error', error => log('error', { message: `torrent: ${error.message}` }))
+    torrent.on('warning', warning => log('error', { message: `torrent warning: ${warning.message}` }))
+  }
+})()
+</script>

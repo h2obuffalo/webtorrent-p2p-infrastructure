@@ -1,0 +1,8 @@
+{"time":"2026-09-17T14:48:03.644Z","category":"direct-tracker-websocket-open","url":"ws://127.0.0.1:8000/announce","protocol":"WebSocket handshake"}
+{"time":"2026-09-17T14:48:03.649Z","category":"seed-ready","infoHash":"9a8097ef6e43369c9418c05ddadc0700b31ae8f6","expectedInfoHash":"9a8097ef6e43369c9418c05ddadc0700b31ae8f6","files":[{"name":"standalone-p2p-test.bin","length":77}]}
+{"time":"2026-09-17T14:48:03.790Z","category":"tracker-announce","infoHash":"9a8097ef6e43369c9418c05ddadc0700b31ae8f6"}
+{"time":"2026-09-17T14:48:07.354Z","category":"peer-discovered","peerId":"2d5757303130392d714e3163626d744f61454642","wireType":"webrtc"}
+{"time":"2026-09-17T14:48:07.355Z","category":"ice-state","iceConnectionState":"connected","connectionState":"connected","gatheringState":"complete"}
+{"time":"2026-09-17T14:48:07.355Z","category":"datachannel-state","state":"open"}
+{"time":"2026-09-17T14:48:08.362Z","category":"ice-selected-pair","state":"succeeded","nominated":true,"localCandidateType":"host","remoteCandidateType":"host","localAddress":"","remoteAddress":"","bytesSent":2302,"bytesReceived":1993}
+{"time":"2026-09-17T14:48:08.362Z","category":"native-getStats","connectionState":"connected","iceConnectionState":"connected","candidateTypes":["host","srflx"],"dataChannels":[{"id":"D28","state":"open","bytesSent":387,"bytesReceived":187,"messagesSent":10,"messagesReceived":10}]}
