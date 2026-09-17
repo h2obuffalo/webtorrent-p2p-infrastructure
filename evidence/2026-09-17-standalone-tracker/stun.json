@@ -1,0 +1,7 @@
+{
+  "iceServer": "stun:stun.l.google.com:19302",
+  "candidateTypes": ["host", "srflx"],
+  "gatheringState": "complete",
+  "error": null,
+  "note": "The browser-observed srflx candidate is recorded by type only; the public address is intentionally omitted."
+}

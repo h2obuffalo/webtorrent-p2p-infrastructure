@@ -1,0 +1,40 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Standalone STUN candidate probe</title>
+<style>body { font: 14px system-ui, sans-serif; margin: 2rem; } pre { background: #111; color: #eee; padding: 1rem; white-space: pre-wrap; }</style>
+<h1>Standalone STUN candidate probe</h1>
+<pre id="result">Starting…</pre>
+<script>
+(async () => {
+  const result = document.querySelector('#result')
+  const evidence = { iceServer: 'stun:stun.l.google.com:19302', candidateTypes: [], candidates: [], gatheringState: null, error: null }
+  const record = () => { result.textContent = JSON.stringify(evidence, null, 2); console.log('[standalone-stun]', evidence) }
+  try {
+    const pc = new RTCPeerConnection({ iceServers: [{ urls: evidence.iceServer }] })
+    pc.createDataChannel('stun-only-probe')
+    pc.onicecandidate = event => {
+      if (!event.candidate) return
+      const candidate = event.candidate.candidate
+      const type = candidate.match(/ typ ([a-z-]+)/)
+      evidence.candidates.push({ candidate, type: type && type[1] })
+      if (type && !evidence.candidateTypes.includes(type[1])) evidence.candidateTypes.push(type[1])
+      record()
+    }
+    await pc.setLocalDescription(await pc.createOffer())
+    await new Promise(resolve => {
+      if (pc.iceGatheringState === 'complete') return resolve()
+      pc.onicegatheringstatechange = () => {
+        evidence.gatheringState = pc.iceGatheringState
+        record()
+        if (pc.iceGatheringState === 'complete') resolve()
+      }
+    })
+    evidence.gatheringState = pc.iceGatheringState
+    record()
+    pc.close()
+  } catch (error) {
+    evidence.error = error.message
+    record()
+  }
+})()
+</script>
